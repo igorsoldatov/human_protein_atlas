@@ -586,20 +586,5 @@ def main():
     # baseline_proba_predictions.to_csv("baseline_predictions.csv")
 
 
-def test():
-    # convert_weights((256, 256, 3), (256, 256, 4), 'resnet18')
-    # convert_weights((256, 256, 3), (256, 256, 4), 'resnet34')
-    # convert_weights((256, 256, 3), (256, 256, 4), 'resnet50')
-    # convert_weights((256, 256, 3), (256, 256, 4), 'resnet101')
-    # convert_weights((256, 256, 3), (256, 256, 4), 'resnet152')
-    # convert_weights((256, 256, 3), (256, 256, 4), 'resnext50')
-    convert_weights((256, 256, 3), (256, 256, 4), 'resnext101')
-    # if 0:
-    #     n_channels = parameter.n_channels
-    #     input_shape_src = (parameter.scaled_row_dim, parameter.scaled_col_dim, n_channels - 1)
-    #     input_shape_trg = (parameter.scaled_row_dim, parameter.scaled_col_dim, n_channels)
-    #     convert_weights(input_shape_src, input_shape_trg, 'resnet50')
-
-
 if __name__ == '__main__':
     main()
