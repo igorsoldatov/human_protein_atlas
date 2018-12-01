@@ -39,6 +39,8 @@ from classification_models import ResNeXt101
 
 from tqdm import tqdm_notebook, tqdm
 
+from multiprocessing import Process
+
 from albumentations import (
     HorizontalFlip, IAAPerspective, ShiftScaleRotate, CLAHE, RandomRotate90,
     Transpose, ShiftScaleRotate, Blur, OpticalDistortion, GridDistortion, HueSaturationValue,
@@ -56,25 +58,19 @@ zoo = {'resnet18': ResNet18,
 
 import warnings
 
-parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('--gpu', default='0', type=str, help='GPU')
-parser.add_argument('--lr', default=0.0001, type=float, help='leaning rate')
-parser.add_argument('--fold', default=1, type=int, help='training fold')
-parser.add_argument('--batch', default=10, type=int, help='batch size')
-parser.add_argument('--epochs', default=10, type=int, help='number of epochs')
-parser.add_argument('--fcl1', default=1024, type=int, help='number of units of FCL1')
-parser.add_argument('--fcl2', default=0, type=int, help='number of units of FCL2')
-parser.add_argument('--tune', default='', type=str, help='hyperparameter for tuning')
-parser.add_argument('--arch', default='resnet50', type=str, help='architecture')
-parser.add_argument('--use_memory', default=False, type=bool, help='use_memory')
-
-global args
-args = parser.parse_args()
-
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-# 1060 - 6 batch size
-# 1070 - 10 batch size
-# adam, lr = 0.0001 - default
+# parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
+# parser.add_argument('--gpu', default='0', type=str, help='GPU')
+# parser.add_argument('--lr', default=0.0001, type=float, help='leaning rate')
+# parser.add_argument('--fold', default=1, type=int, help='training fold')
+# parser.add_argument('--batch', default=10, type=int, help='batch size')
+# parser.add_argument('--epochs', default=10, type=int, help='number of epochs')
+# parser.add_argument('--fcl1', default=1024, type=int, help='number of units of FCL1')
+# parser.add_argument('--fcl2', default=0, type=int, help='number of units of FCL2')
+# parser.add_argument('--tune', default='', type=str, help='hyperparameter for tuning')
+# parser.add_argument('--arch', default='resnet50', type=str, help='architecture')
+# parser.add_argument('--use_memory', default=False, type=bool, help='use_memory')
+# global args
+# args = parser.parse_args()
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -242,7 +238,8 @@ class ModelParameter:
                  fcl1=0,
                  fcl2=0,
                  tune='test',
-                 arch='resnet18'):
+                 arch='resnet18',
+                 dataset=None):
         self.basepath = basepath
         self.arch = arch
         self.lr = lr
@@ -269,6 +266,7 @@ class ModelParameter:
             self.log_dir = 'logs/{}/{}-{}-{}'.format(tune, arch, tune, self.__getattribute__(tune))
             self.model_name = 'models/{}/{}-{}-{}.h5'.format(tune, arch, tune, self.__getattribute__(tune))
         self.tensorbord = TensorBoard(log_dir=self.log_dir)
+        self.dataset = dataset
 
 
 class ImagePreprocessor:
@@ -388,7 +386,7 @@ class ImagePreprocessor:
 
 class DataGenerator(keras.utils.Sequence):
 
-    def __init__(self, list_IDs, labels, modelparameter, imagepreprocessor, dataset=None):
+    def __init__(self, list_IDs, labels, modelparameter, imagepreprocessor):
         self.params = modelparameter
         self.labels = labels
         self.list_IDs = list_IDs
@@ -399,8 +397,8 @@ class DataGenerator(keras.utils.Sequence):
         self.shuffle = self.params.shuffle
         self.preprocessor = imagepreprocessor
         self.on_epoch_end()
-        self.dataset = dataset
-        self.use_memory = (dataset is not None)
+        self.dataset = self.params.dataset
+        self.use_memory = (self.dataset is not None)
         if self.use_memory:
             self.nlabels = {}
             for n, idx in tqdm(enumerate(labels['Id'].tolist()), total=len(labels)):
@@ -535,40 +533,36 @@ class BaseLineModel:
         self.model = load_model(modelinputpath, custom_objects=custom_objects)
 
 
-def main():
-    train_path = '../DATASET/human_protein_atlas/all/train/'
-
-    fold = args.fold
-    labels = pd.read_csv('../DATASET/human_protein_atlas/all/train.csv')
+def get_labels(path):
+    labels = pd.read_csv(path)
     labels["number_of_targets"] = labels.drop(["Id", "Target"], axis=1).sum(axis=1)
     for key in label_names.keys():
         labels[label_names[key]] = 0
     labels = labels.apply(fill_targets, axis=1)
+    return labels
+
+
+def load_image(path, image_id):
+    image = np.zeros(shape=(512, 512, 4), dtype=np.uint8)
+    image[:, :, 0] = imread(path + image_id + "_green" + ".png")
+    image[:, :, 1] = imread(path + image_id + "_blue" + ".png")
+    image[:, :, 2] = imread(path + image_id + "_red" + ".png")
+    image[:, :, 3] = imread(path + image_id + "_yellow" + ".png")
+    return image
+
+
+def train_gpu(gpu, fold, train_path, labels, parameter):
+    os.environ['CUDA_VISIBLE_DEVICES'] = gpu
 
     train_labels = pd.read_csv(f'./folds/train_{fold}.csv')
     valid_labels = pd.read_csv(f'./folds/valid_{fold}.csv')
     train_ids = train_labels.Id.tolist()
     valid_ids = valid_labels.Id.tolist()
 
-    parameter = ModelParameter(train_path,
-                               lr=args.lr,
-                               fcl1=args.fcl1,
-                               fcl2=args.fcl2,
-                               batch_size=args.batch,
-                               n_epochs=args.epochs,
-                               tune=args.tune,
-                               arch=args.arch)
     preprocessor = ImagePreprocessor(parameter)
 
-    dataset = None
-    if args.use_memory:
-        print(f'use_memory={args.use_memory}')
-        dataset = np.zeros((len(labels), 512, 512, 4), dtype=np.uint8)
-        for n, idx in tqdm(enumerate(labels['Id'].tolist()), total=len(labels)):
-            dataset[n, :, :, :] = preprocessor.load_image(idx)
-
-    training_generator = DataGenerator(train_ids, labels, parameter, preprocessor, dataset)
-    validation_generator = DataGenerator(valid_ids, labels, parameter, preprocessor, dataset)
+    training_generator = DataGenerator(train_ids, labels, parameter, preprocessor)
+    validation_generator = DataGenerator(valid_ids, labels, parameter, preprocessor)
     predict_generator = PredictGenerator(valid_ids, preprocessor, train_path)
 
     model = BaseLineModel(parameter)
@@ -577,13 +571,47 @@ def main():
     model.set_generators(training_generator, validation_generator)
     history = model.learn()
 
-    # os.mkdir(f'models/{args.tune}/')
     os.makedirs(f'models/{args.tune}/', exist_ok=True)
     model.save(parameter.model_name)
-    # proba_predictions = model.predict(predict_generator)
-    # baseline_proba_predictions = pd.DataFrame(proba_predictions, columns=labels.drop(
-    #     ["Target", "number_of_targets", "Id"], axis=1).columns)
-    # baseline_proba_predictions.to_csv("baseline_predictions.csv")
+
+
+def main():
+    train_path = '../DATASET/human_protein_atlas/all/train/'
+    labels = get_labels('../DATASET/human_protein_atlas/all/train.csv')
+
+    dataset = np.zeros((len(labels), 512, 512, 4), dtype=np.uint8)
+    for n, idx in tqdm(enumerate(labels['Id'].tolist()), total=len(labels)):
+        dataset[n, :, :, :] = load_image(train_path, idx)
+
+    param1 = ModelParameter(train_path,
+                            lr=0.00002738,
+                            fcl1=1024,
+                            fcl2=1024,
+                            batch_size=100,
+                            n_epochs=200,
+                            tune='fcl',
+                            arch='resnet18',
+                            dataset=dataset)
+
+    p1 = Process(target=train_gpu, args=('0', 1, train_path, labels, param1))
+
+    param2 = ModelParameter(train_path,
+                            lr=0.00002738,
+                            fcl1=1024,
+                            fcl2=1024,
+                            batch_size=64,
+                            n_epochs=200,
+                            tune='fcl',
+                            arch='resnet18',
+                            dataset=dataset)
+
+    p2 = Process(target=train_gpu, args=('1', 1, train_path, labels, param2))
+
+    p1.start()
+    p2.start()
+
+    p1.join()
+    p2.join()
 
 
 if __name__ == '__main__':
