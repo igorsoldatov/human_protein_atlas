@@ -58,11 +58,12 @@ scipy.misc.imsave(f'./augs/origing.jpg', image[:, :, :3])
 
 whatever_data = "my name"
 augmentation = strong_aug(p=0.9)
-data = {"image": image, "whatever_data": whatever_data, "additional": "hello"}
+data = {"image": image}
 
 for i in range(100):
-    augmented = augmentation(**data)
-    image, whatever_data, additional = augmented["image"], augmented["whatever_data"], augmented["additional"]
+    # augmented = augmentation(**data)
+    # image = augmented["image"]
+    image = augmentation(**data)["image"]
     scipy.misc.imsave(f'./augs/{randint(1, 100000000)}.jpg', image[:, :, :3])
 
 # plt.imshow(image[:, :, :3])

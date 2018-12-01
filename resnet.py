@@ -6,11 +6,13 @@ import os
 import keras
 import warnings
 import argparse
+import scipy.misc
 
-from random import randrange
+from random import randrange, randint
 from PIL import Image
 from scipy.misc import imread
 from skimage.transform import resize
+from sklearn.metrics import f1_score
 from time import time
 from tensorflow.python.keras.callbacks import TensorBoard
 
@@ -24,6 +26,7 @@ from keras.callbacks import ModelCheckpoint
 from keras import metrics
 from keras.optimizers import Adam
 from keras import backend as K
+from keras.models import load_model
 
 from classification_models import ResNet18
 from classification_models import ResNet34
@@ -35,6 +38,13 @@ from classification_models import ResNeXt50
 from classification_models import ResNeXt101
 
 from tqdm import tqdm_notebook, tqdm
+
+from albumentations import (
+    HorizontalFlip, IAAPerspective, ShiftScaleRotate, CLAHE, RandomRotate90,
+    Transpose, ShiftScaleRotate, Blur, OpticalDistortion, GridDistortion, HueSaturationValue,
+    IAAAdditiveGaussianNoise, GaussNoise, MotionBlur, MedianBlur, IAAPiecewiseAffine,
+    IAASharpen, IAAEmboss, RandomContrast, RandomBrightness, Flip, OneOf, Compose
+)
 
 zoo = {'resnet18': ResNet18,
        'resnet34': ResNet34,
@@ -56,6 +66,7 @@ parser.add_argument('--fcl1', default=1024, type=int, help='number of units of F
 parser.add_argument('--fcl2', default=0, type=int, help='number of units of FCL2')
 parser.add_argument('--tune', default='', type=str, help='hyperparameter for tuning')
 parser.add_argument('--arch', default='resnet50', type=str, help='architecture')
+parser.add_argument('--use_memory', default=False, type=bool, help='use_memory')
 
 global args
 args = parser.parse_args()
@@ -268,12 +279,14 @@ class ImagePreprocessor:
         self.scaled_row_dim = self.parameter.scaled_row_dim
         self.scaled_col_dim = self.parameter.scaled_col_dim
         self.n_channels = self.parameter.n_channels
+        self.augmentation = self.strong_aug(p=0.9)
 
     def preprocess(self, image):
         # image = self.resize(image)
-        # image = self.crop_random(image)
+        image = self.crop_random(image)
         # image = self.reshape(image)
-        image = self.crop4(image)
+        # data = {"image": image}
+        # image = self.augmentation(**data)["image"]
         image = self.normalize(image)
         return image
 
@@ -325,6 +338,36 @@ class ImagePreprocessor:
         image = resize(image, (self.scaled_row_dim, self.scaled_col_dim))
         return image
 
+    def strong_aug(self, p=0.5):
+        return Compose([
+            RandomRotate90(),
+            Flip(),
+            Transpose(),
+            OneOf([
+                IAAAdditiveGaussianNoise(),
+                GaussNoise(),
+            ], p=0.2),
+            OneOf([
+                MotionBlur(p=0.2),
+                MedianBlur(blur_limit=3, p=0.1),
+                Blur(blur_limit=3, p=0.1),
+            ], p=0.2),
+            ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=45, p=0.2),
+            OneOf([
+                OpticalDistortion(p=0.3),
+                GridDistortion(p=0.1),
+                IAAPiecewiseAffine(p=0.3),
+            ], p=0.2),
+            OneOf([
+                CLAHE(clip_limit=2),
+                IAASharpen(),
+                IAAEmboss(),
+                RandomContrast(),
+                RandomBrightness(),
+            ], p=0.3),
+            HueSaturationValue(p=0.3),
+        ], p=p)
+
     def reshape(self, image):
         image = np.reshape(image, (image.shape[0], image.shape[1], self.n_channels))
         return image
@@ -335,7 +378,7 @@ class ImagePreprocessor:
         return image
 
     def load_image(self, image_id):
-        image = np.zeros(shape=(512, 512, 4), dtype=np.float16)
+        image = np.zeros(shape=(512, 512, 4), dtype=np.uint8)
         image[:, :, 0] = imread(self.basepath + image_id + "_green" + ".png")
         image[:, :, 1] = imread(self.basepath + image_id + "_blue" + ".png")
         image[:, :, 2] = imread(self.basepath + image_id + "_red" + ".png")
@@ -345,7 +388,7 @@ class ImagePreprocessor:
 
 class DataGenerator(keras.utils.Sequence):
 
-    def __init__(self, list_IDs, labels, modelparameter, imagepreprocessor):
+    def __init__(self, list_IDs, labels, modelparameter, imagepreprocessor, dataset=None):
         self.params = modelparameter
         self.labels = labels
         self.list_IDs = list_IDs
@@ -356,6 +399,12 @@ class DataGenerator(keras.utils.Sequence):
         self.shuffle = self.params.shuffle
         self.preprocessor = imagepreprocessor
         self.on_epoch_end()
+        self.dataset = dataset
+        self.use_memory = (dataset is not None)
+        if self.use_memory:
+            self.nlabels = {}
+            for n, idx in tqdm(enumerate(labels['Id'].tolist()), total=len(labels)):
+                self.nlabels[idx] = n
 
     def on_epoch_end(self):
         self.indexes = np.arange(len(self.list_IDs))
@@ -373,7 +422,10 @@ class DataGenerator(keras.utils.Sequence):
         # Generate data
         for i, identifier in enumerate(list_IDs_temp):
             # Store sample
-            image = self.preprocessor.load_image(identifier)
+            if self.use_memory:
+                image = self.dataset[self.nlabels[identifier]]
+            else:
+                image = self.preprocessor.load_image(identifier)
             image = self.preprocessor.preprocess(image)
             X[i] = image
             # Store class
@@ -479,8 +531,8 @@ class BaseLineModel:
     def save(self, modeloutputpath):
         self.model.save(modeloutputpath)
 
-    def load(self, modelinputpath):
-        self.model = load_model(modelinputpath)
+    def load(self, modelinputpath, custom_objects={}):
+        self.model = load_model(modelinputpath, custom_objects=custom_objects)
 
 
 def main():
@@ -508,14 +560,15 @@ def main():
                                arch=args.arch)
     preprocessor = ImagePreprocessor(parameter)
 
-    if 0:
-        n_channels = parameter.n_channels
-        input_shape_src = (parameter.scaled_row_dim, parameter.scaled_col_dim, n_channels - 1)
-        input_shape_trg = (parameter.scaled_row_dim, parameter.scaled_col_dim, n_channels)
-        convert_weights(input_shape_src, input_shape_trg, 'resnet50')
+    dataset = None
+    if args.use_memory:
+        print(f'use_memory={args.use_memory}')
+        dataset = np.zeros((len(labels), 512, 512, 4), dtype=np.uint8)
+        for n, idx in tqdm(enumerate(labels['Id'].tolist()), total=len(labels)):
+            dataset[n, :, :, :] = preprocessor.load_image(idx)
 
-    training_generator = DataGenerator(train_ids, labels, parameter, preprocessor)
-    validation_generator = DataGenerator(valid_ids, labels, parameter, preprocessor)
+    training_generator = DataGenerator(train_ids, labels, parameter, preprocessor, dataset)
+    validation_generator = DataGenerator(valid_ids, labels, parameter, preprocessor, dataset)
     predict_generator = PredictGenerator(valid_ids, preprocessor, train_path)
 
     model = BaseLineModel(parameter)
@@ -541,6 +594,11 @@ def test():
     # convert_weights((256, 256, 3), (256, 256, 4), 'resnet152')
     # convert_weights((256, 256, 3), (256, 256, 4), 'resnext50')
     convert_weights((256, 256, 3), (256, 256, 4), 'resnext101')
+    # if 0:
+    #     n_channels = parameter.n_channels
+    #     input_shape_src = (parameter.scaled_row_dim, parameter.scaled_col_dim, n_channels - 1)
+    #     input_shape_trg = (parameter.scaled_row_dim, parameter.scaled_col_dim, n_channels)
+    #     convert_weights(input_shape_src, input_shape_trg, 'resnet50')
 
 
 if __name__ == '__main__':
