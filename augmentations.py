@@ -11,6 +11,8 @@ from scipy.misc import imread
 import matplotlib.pyplot as plt
 import scipy.misc
 
+from tqdm import tqdm_notebook, tqdm
+
 
 def load_image(image_id='00383b44-bbbb-11e8-b2ba-ac1f6b6435d0'):
     path = '../DATASET/human_protein_atlas/all/train/'
@@ -43,13 +45,13 @@ def strong_aug(p=0.5):
             IAAPiecewiseAffine(p=0.3),
         ], p=0.2),
         OneOf([
-            CLAHE(clip_limit=2),
+            # CLAHE(clip_limit=2),
             IAASharpen(),
             IAAEmboss(),
             RandomContrast(),
             RandomBrightness(),
         ], p=0.3),
-        HueSaturationValue(p=0.3),
+        # HueSaturationValue(p=0.3),
     ], p=p)
 
 
@@ -57,14 +59,17 @@ image = load_image()
 scipy.misc.imsave(f'./augs/origing.jpg', image[:, :, :3])
 
 whatever_data = "my name"
-augmentation = strong_aug(p=0.9)
+augmentation = strong_aug(p=1.0)
 data = {"image": image}
 
-for i in range(100):
+for n in range(1000):
     # augmented = augmentation(**data)
     # image = augmented["image"]
     image = augmentation(**data)["image"]
-    scipy.misc.imsave(f'./augs/{randint(1, 100000000)}.jpg', image[:, :, :3])
+    # print(f'shape={image.shape}')
+    if image.shape[2] == 3:
+        print(f'shape={image.shape}')
+    # scipy.misc.imsave(f'./augs/{randint(1, 100000000)}.jpg', image[:, :, :3])
 
 # plt.imshow(image[:, :, :3])
 # plt.show()

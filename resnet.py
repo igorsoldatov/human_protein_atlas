@@ -239,7 +239,8 @@ class ModelParameter:
                  fcl2=0,
                  tune='test',
                  arch='resnet18',
-                 dataset=None):
+                 dataset=None,
+                 aug='strong_aug'):
         self.basepath = basepath
         self.arch = arch
         self.lr = lr
@@ -256,6 +257,7 @@ class ModelParameter:
         self.n_epochs = n_epochs
         self.fcl1 = fcl1
         self.fcl2 = fcl2
+        self.aug = aug
         if tune == 'lr':
             self.log_dir = 'logs/{}/{}-{}-{:.8f}'.format(tune, arch, tune, self.__getattribute__(tune))
             self.model_name = 'models/{}/{}-{}-{:.8f}.h5'.format(tune, arch, tune, self.__getattribute__(tune))
@@ -277,14 +279,22 @@ class ImagePreprocessor:
         self.scaled_row_dim = self.parameter.scaled_row_dim
         self.scaled_col_dim = self.parameter.scaled_col_dim
         self.n_channels = self.parameter.n_channels
+        self.aug = self.parameter.aug
         self.augmentation = self.strong_aug(p=0.9)
 
     def preprocess(self, image):
         # image = self.resize(image)
-        image = self.crop_random(image)
         # image = self.reshape(image)
-        # data = {"image": image}
-        # image = self.augmentation(**data)["image"]
+        if self.aug == 'crop_random':
+            image = self.crop_random(image)
+        elif self.aug == 'crop4':
+            image = self.crop4(image)
+        elif self.aug == 'crop9':
+            image = self.crop9(image)
+        elif self.aug == 'strong_aug':
+            image = self.crop_random(image)
+            data = {"image": image}
+            image = self.augmentation(**data)["image"]
         image = self.normalize(image)
         return image
 
@@ -357,13 +367,13 @@ class ImagePreprocessor:
                 IAAPiecewiseAffine(p=0.3),
             ], p=0.2),
             OneOf([
-                CLAHE(clip_limit=2),
+                # CLAHE(clip_limit=2),
                 IAASharpen(),
                 IAAEmboss(),
                 RandomContrast(),
                 RandomBrightness(),
             ], p=0.3),
-            HueSaturationValue(p=0.3),
+            # HueSaturationValue(p=0.3),
         ], p=p)
 
     def reshape(self, image):
@@ -571,8 +581,100 @@ def train_gpu(gpu, fold, train_path, labels, parameter):
     model.set_generators(training_generator, validation_generator)
     history = model.learn()
 
-    os.makedirs(f'models/{args.tune}/', exist_ok=True)
+    os.makedirs(f'models/{parameter.tune}/', exist_ok=True)
     model.save(parameter.model_name)
+
+
+
+def crop4(image):
+    h = 256
+    w = 256
+    crops = []
+    crops.append(image[:h, :w])
+    crops.append(image[:h, w:])
+    crops.append(image[h:, :w])
+    crops.append(image[h:, w:])
+    return crops
+
+
+def crop9(image):
+    h = 256
+    w = 256
+    crops = []
+    crops.append(image[:h, :w])
+    crops.append(image[:h, int(w / 2):w + int(w / 2)])
+    crops.append( image[:h, w:])
+    crops.append(image[int(h / 2):w + int(h / 2):, :w])
+    crops.append(image[int(h / 2):w + int(h / 2):, int(w / 2):w + int(w / 2)])
+    crops.append(image[int(h / 2):w + int(h / 2):, w:])
+    crops.append(image[h:, :w])
+    crops.append(image[h:, int(w / 2):w + int(w / 2)])
+    crops.append(image[h:, w:])
+    return crops
+
+
+def predict_crop4(model, image):
+    crops = crop4(image)
+    score_predict = np.zeros((4, 28))
+    for n, crop in enumerate(crops):
+        crop = crop.astype(dtype=np.float16)
+        crop /= 255
+        crop = crop.reshape((1, *crop.shape))
+        score_predict[n, :] = model.model.predict(crop)
+    score_predict = score_predict.sum(axis=0)
+    return score_predict.astype(np.float16)
+
+
+def predict_crop9(model, image):
+    crops = crop9(image)
+    score_predict = np.zeros((9, 28))
+    for n, crop in enumerate(crops):
+        crop = crop.astype(dtype=np.float16)
+        crop /= 255
+        crop = crop.reshape((1, *crop.shape))
+        score_predict[n, :] = model.model.predict(crop)
+    score_predict = score_predict.sum(axis=0)
+    return score_predict.astype(np.float16)
+
+
+def predict_submission(name):
+    test_path = '../DATASET/human_protein_atlas/all/test/'
+
+    labels = pd.read_csv('../DATASET/human_protein_atlas/all/sample_submission.csv')
+
+    parameter = ModelParameter(test_path,
+                            lr=0.00002738,
+                            fcl1=1024,
+                            fcl2=1024,
+                            batch_size=100,
+                            n_epochs=300,
+                            tune='aug',
+                            arch='resnet18',
+                            dataset=None,
+                            aug='strong_aug')
+    preprocessor = ImagePreprocessor(parameter)
+
+    model = BaseLineModel(parameter)
+    model.build_model()
+    model.compile_model()
+
+    model.load(f'./models/new/{name}.h5', custom_objects={'f1_loss': f1_loss, 'f1': f1})
+
+    predicted = []
+    for n in range(9):
+        predicted.append([])
+    for idx in tqdm(labels['Id'], total=len(labels)):
+        image = preprocessor.load_image(idx)
+        score_predict = predict_crop9(model, image)
+        for n in range(9):
+            score = (score_predict >= n+1)
+            label_predict = np.arange(28)[score >= 0.5]
+            str_predict_label = ' '.join(str(l) for l in label_predict)
+            predicted[n].append(str_predict_label)
+
+    for n in range(9):
+        labels['Predicted'] = predicted[n]
+        labels.to_csv(f'./submissions/{name}-TTA9(th-{n+1}).csv', header=True, index=False)
 
 
 def main():
@@ -588,30 +690,32 @@ def main():
                             fcl1=1024,
                             fcl2=1024,
                             batch_size=100,
-                            n_epochs=200,
-                            tune='fcl',
+                            n_epochs=300,
+                            tune='aug',
                             arch='resnet18',
-                            dataset=dataset)
+                            dataset=dataset,
+                            aug='strong_aug')
 
     p1 = Process(target=train_gpu, args=('0', 1, train_path, labels, param1))
 
-    param2 = ModelParameter(train_path,
-                            lr=0.00002738,
-                            fcl1=1024,
-                            fcl2=1024,
-                            batch_size=64,
-                            n_epochs=200,
-                            tune='fcl',
-                            arch='resnet18',
-                            dataset=dataset)
-
-    p2 = Process(target=train_gpu, args=('1', 1, train_path, labels, param2))
+    # param2 = ModelParameter(train_path,
+    #                         lr=0.00002738,
+    #                         fcl1=1024,
+    #                         fcl2=1024,
+    #                         batch_size=64,
+    #                         n_epochs=200,
+    #                         tune='aug',
+    #                         arch='resnet18',
+    #                         dataset=dataset,
+    #                         aug='strong_aug')
+    #
+    # p2 = Process(target=train_gpu, args=('1', 1, train_path, labels, param2))
 
     p1.start()
-    p2.start()
+    # p2.start()
 
     p1.join()
-    p2.join()
+    # p2.join()
 
 
 if __name__ == '__main__':
