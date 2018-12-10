@@ -2,7 +2,7 @@ from albumentations import (
     HorizontalFlip, IAAPerspective, ShiftScaleRotate, CLAHE, RandomRotate90,
     Transpose, ShiftScaleRotate, Blur, OpticalDistortion, GridDistortion, HueSaturationValue,
     IAAAdditiveGaussianNoise, GaussNoise, MotionBlur, MedianBlur, IAAPiecewiseAffine,
-    IAASharpen, IAAEmboss, RandomContrast, RandomBrightness, Flip, OneOf, Compose
+    IAASharpen, IAAEmboss, RandomContrast, RandomBrightness, Flip, OneOf, Compose, ElasticTransform
 )
 from random import randrange
 from random import randint
@@ -29,6 +29,7 @@ def strong_aug(p=0.5):
         RandomRotate90(),
         Flip(),
         Transpose(),
+        ElasticTransform(p=1.0),
         OneOf([
             IAAAdditiveGaussianNoise(),
             GaussNoise(),
@@ -69,7 +70,7 @@ for n in range(1000):
     # print(f'shape={image.shape}')
     if image.shape[2] == 3:
         print(f'shape={image.shape}')
-    # scipy.misc.imsave(f'./augs/{randint(1, 100000000)}.jpg', image[:, :, :3])
+    scipy.misc.imsave(f'./augs/{randint(1, 100000000)}.jpg', image[:, :, :3])
 
 # plt.imshow(image[:, :, :3])
 # plt.show()
