@@ -1,17 +1,21 @@
+PYTHONHASHSEED=0
 import numpy as np
 import pandas as pd
 # import matplotlib.pyplot as plt
 import tensorflow as tf
 import os
+import random as rn
+np.random.seed(2018)
+rn.seed(2018)
 import keras
 import warnings
 import argparse
 import scipy.misc
 
+
 from random import randrange, randint
-import random
 from PIL import Image
-from scipy.misc import imread
+from scipy.misc import imread, imsave
 from skimage.transform import resize
 from sklearn.metrics import f1_score
 from time import time
@@ -27,6 +31,7 @@ from keras.callbacks import ModelCheckpoint
 from keras import metrics
 from keras.optimizers import Adam
 from keras import backend as K
+tf.set_random_seed(2018)
 from keras.models import load_model
 
 from classification_models import ResNet18
@@ -75,9 +80,6 @@ import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
-
-random.seed(2018)
-np.random.seed(2018)
 
 label_names = {
     0: "Nucleoplasm",
@@ -136,34 +138,6 @@ def resize_img(image):
     return image_.astype(np.uint8)
 
 
-def train_gpu(gpu, fold, train_path, labels, parameter):
-    os.environ['CUDA_VISIBLE_DEVICES'] = gpu
-
-    os.makedirs(f'models/{parameter.tune}/', exist_ok=True)
-
-    train_labels = pd.read_csv(f'./folds/train_{fold}.csv')
-    valid_labels = pd.read_csv(f'./folds/valid_{fold}.csv')
-    train_ids = train_labels.Id.tolist()
-    valid_ids = valid_labels.Id.tolist()
-
-    preprocessor = ImagePreprocessor(parameter)
-
-    training_generator = DataGeneratorTrainDist(train_ids, labels, parameter, preprocessor)
-    validation_generator = DataGenerator(valid_ids, labels, parameter, preprocessor, validation=True)
-    predict_generator = PredictGenerator(valid_ids, preprocessor, train_path)
-
-    model = BaseLineModel(parameter)
-    model.build_model()
-    model.compile_model()
-    # name = '24_resnet18-batch_size-170-lr-0.45417-87ep'
-    # model.load(f'./models/batch_size/{name}.h5', custom_objects={'f1_loss': f1_loss, 'f1': f1})
-    model.set_generators(training_generator, validation_generator)
-    history = model.learn()
-
-    # os.makedirs(f'models/{parameter.tune}/', exist_ok=True)
-    # model.save(parameter.model_name)
-
-
 def crop4(image):
     h = 256
     w = 256
@@ -215,27 +189,112 @@ def predict_crop9(model, image):
     return score_predict.astype(np.float16)
 
 
-def predict_submission(name, TTA=False):
-    test_path = '../DATASET/human_protein_atlas/all/test/'
+def predict_submission(name, number, TTA=False):
+    def make_subs(labels_, predict_, file_name, class_num=28):
+        predicted_ = []
+        for i in range(predict_.shape[0]):
+            label = np.arange(class_num)[predict_[i]]
+            str_label = ' '.join(str(l) for l in label)
+            if class_num != 28:
+                predicted_.append(retarget_15(str_label))
+            else:
+                predicted_.append(str_label)
+        labels_['Predicted'] = predicted_
+        labels_.to_csv(file_name, header=True, index=False)
 
+    def make_subs_by_classes(labels_, predict_, file_name, class_num=28):
+        predicted_ = []
+        for i in range(28):
+            predicted_.append([])
+
+        for i in range(predict_.shape[0]):
+            label = np.arange(class_num)[predict_[i]]
+            label = label.tolist()
+            if class_num == 28:
+                label = [str(l_) for l_ in label]
+            else:
+                label = [retarget_15(str(l_)) for l_ in label]
+            for l in range(28):
+                if str(l) in label:
+                    predicted_[l].append(str(l))
+                else:
+                    predicted_[l].append('')
+
+        for i in range(28):
+            labels_['Predicted'] = predicted_[i]
+            labels_.to_csv(file_name + f'_{str(i).zfill(2)}.csv', header=True, index=False)
+
+    def predict_and_save_row_scores(model_, labels_, name_, number_):
+        score_predict_ = np.zeros((len(labels_), 28))
+        for n_, idx_ in tqdm(enumerate(labels_['Id']), total=len(labels_)):
+            image_ = preprocessor.load_image(idx_)
+            image_ = preprocessor.preprocess(image_, True)
+            image_ = image_.reshape((1, *image_.shape))
+            score_predict_[n_] = model_.model.predict(image_)[0]
+        os.makedirs(f'./score_predict/{number_}/', exist_ok=True)
+        np.save(f'./score_predict/{number_}/{name_}.npy', score_predict_)
+        return score_predict_
+
+    def get_norm(classes_sum):
+        classes_sum_target = np.array([4852, 472, 1364, 588, 700, 946, 380, 1063, 20, 17, 11, 412, 259, 202,
+                                       401, 8, 200, 79, 340, 558, 65, 1422, 302, 1117, 121, 3099, 124, 4])
+        coef = np.array([1, 10, 4, 8, 7, 5, 13, 5, 243, 285, 441, 12, 19, 24,
+                         12, 607, 24, 61, 14, 9, 75, 3, 16, 4, 40, 2, 39, 1213])
+        norm = np.absolute(classes_sum_target - classes_sum)
+        norm = norm * coef
+        sum_norm = norm.sum()
+        return sum_norm
+
+    def retarget_15(target_):
+        maping = {'0': '',
+                  '1': '8',
+                  '2': '9',
+                  '3': '10',
+                  '4': '11',
+                  '5': '12',
+                  '6': '13',
+                  '7': '15',
+                  '8': '16',
+                  '9': '17',
+                  '10': '18',
+                  '11': '20',
+                  '12': '24',
+                  '13': '26',
+                  '14': '27'}
+        new_targets_ = []
+        nt = ''
+        if target_ != '':
+            targets_ = np.array(target_.split(' ')).astype(np.uint8).tolist()
+            for tr in targets_:
+                new_targets_.append(maping[str(tr)])
+            nt = ' '.join(str(l) for l in new_targets_)
+        return nt
+
+
+    os.makedirs(f'./submissions/{number}/', exist_ok=True)
+    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+    test_path = '../DATASET/human_protein_atlas/all/test/'
     labels = pd.read_csv('../DATASET/human_protein_atlas/all/sample_submission.csv')
 
-    parameter = ModelParameter(test_path,
-                            lr=0.00003,
-                            fcl=[1024, 1024, 1024],
-                            batch_size=175,
-                            n_epochs=300,
-                            tune='aug',
-                            arch='resnet18',
-                            dataset=None,
-                            aug='strong_aug')
-    preprocessor = ImagePreprocessor(parameter)
+    if 0:
+        parameter = ModelParameter(test_path,
+                                lr=0.00003,
+                                fcl=[1024, 1024, 1024],
+                                batch_size=150,
+                                n_epochs=100,
+                                tune='aug',
+                                arch='resnet18',
+                                dataset=None,
+                                aug='strong_aug')
+        preprocessor = ImagePreprocessor(parameter)
 
-    model = BaseLineModel(parameter)
-    # model.build_model()
-    # model.compile_model()
+        model = BaseLineModel(parameter)
+        # model.build_model()
+        # model.compile_model()
 
-    model.load(f'./models/new/{name}.h5', custom_objects={'f1_loss': f1_loss, 'f1': f1})
+        model.load(f'./models/{number}/{name}.h5', custom_objects={'f1_loss': f1_loss, 'f1': f1})
+
+        # score_predict = predict_and_save_row_scores(model, labels, name, number)
 
     if TTA:
         predicted = []
@@ -253,27 +312,135 @@ def predict_submission(name, TTA=False):
         for n in range(9):
             labels['Predicted'] = predicted[n]
             labels.to_csv(f'./submissions/{name}-TTA9(th-{n+1}).csv', header=True, index=False)
+    elif 0:
+        predict = (score_predict >= 0.5)
+        make_subs(labels, predict, f'./submissions/{number}/{name}-baseline.csv')
+    elif 0:
+        score_predict = np.load(f'./score_predict/{number}/{name}.npy')
+
+        train_labels = pd.read_csv('../DATASET/human_protein_atlas/all/train_ord.csv')
+        target_dist = get_distribution(train_labels)
+        target_dist = target_dist / target_dist.sum()
+
+        sigma = 0.005
+        singl = [-1, 1]
+        thresholds = np.ones(28)
+        thresholds *= 0.5
+
+        label_predict = (score_predict >= thresholds)
+        make_subs(labels, label_predict, f'./submissions/{name}_baseline.csv')
+        classes_sum = label_predict.sum(axis=0)
+        print('Baseline')
+        print('Number of classes: ')
+        print(classes_sum)
+        dist = classes_sum / classes_sum.sum()
+        best_norm = np.linalg.norm(target_dist - dist)
+        print('\nBaseline distribution: ')
+        print(dist)
+        print('\nTarget distribution:')
+        print(target_dist)
+        print(f'\nThe best norm: {best_norm}\n\n\n')
+        for i in tqdm(range(100000), total=100000):
+            r = randrange(0, 28)
+            s = rn.choices(singl)[0]
+            new_thresholds = thresholds.copy()
+            new_thresholds[r] += s * sigma
+            label_predict = (score_predict >= new_thresholds)
+            classes_sum = label_predict.sum(axis=0)
+            dist = classes_sum / classes_sum.sum()
+            norm = np.linalg.norm(target_dist - dist)
+            if norm <= best_norm:
+                best_norm = norm
+                thresholds = new_thresholds
+                # print(f'best_norm: {best_norm}')
+        print('The best')
+        print('The best number of classes: ')
+        print(classes_sum)
+        print(f'\nThe best thresholds: ')
+        print(thresholds)
+        print(f'\nThe best distribution: ')
+        print(dist)
+        print(f'\nThe best norm: {best_norm}\n\n\n')
+        best_label_predict = (score_predict >= thresholds)
+        make_subs(labels, best_label_predict, f'./submissions/{name}_best_thresholds_{best_norm}.csv')
+    elif 0:
+        score_predict = np.load(f'./score_predict/{number}/{name}.npy')
+
+        sigma = 0.005
+        singl = [-1, 1]
+        thresholds = np.ones(28)
+        thresholds *= 0.15
+
+        label_predict = (score_predict >= thresholds)
+        make_subs(labels, label_predict, f'./submissions/{number}/{name}_baseline.csv')
+        make_subs_by_classes(labels, label_predict, f'./submissions/{number}/{name}_baseline')
+        if 0:
+            classes_sum = label_predict.sum(axis=0)
+            print('Baseline')
+            print('Number of classes: ')
+            print(classes_sum)
+            best_norm = get_norm(classes_sum)
+            print(f'\nThe best norm: {best_norm}\n\n\n')
+            for i in tqdm(range(100000), total=100000):
+                r = randrange(0, 28)
+                s = rn.choices(singl)[0]
+                new_thresholds = thresholds.copy()
+                new_thresholds[r] += s * sigma
+                label_predict = (score_predict >= new_thresholds)
+                classes_sum = label_predict.sum(axis=0)
+                # dist = classes_sum / classes_sum.sum()
+                # norm = np.linalg.norm(target_dist - dist)
+                norm = get_norm(classes_sum)
+                if norm <= best_norm:
+                    best_norm = norm
+                    thresholds = new_thresholds
+                    # print(f'best_norm: {best_norm}')
+            print('The best')
+            print('The best number of classes: ')
+            print(classes_sum)
+            print(f'\nThe best thresholds: ')
+            print(thresholds)
+            print(f'\nThe best norm: {best_norm}\n\n\n')
+            best_label_predict = (score_predict >= thresholds)
+            make_subs(labels, best_label_predict, f'./submissions/{number}/{name}_best_thresholds_{best_norm}')
+            # make_subs_by_classes(labels, best_label_predict, f'./submissions/{number}/{name}_best_thresholds_{best_norm}')
     else:
-        predicted = []
-        for idx in tqdm(labels['Id'], total=len(labels)):
-            image = preprocessor.load_image(idx)
-            image = preprocessor.preprocess(image, True)
-            image = image.reshape((1, *image.shape))
-            score_predict = model.model.predict(image)[0]
-            label_predict = np.arange(28)[score_predict >= 0.15]
-            str_predict_label = ' '.join(str(l) for l in label_predict)
-            predicted.append(str_predict_label)
-        labels['Predicted'] = predicted
-        labels.to_csv(f'./submissions/{name}-th-0.15.csv', header=True, index=False)
+        score_predict = np.load(f'./score_predict/{number}/{name}.npy')
+
+        class_num = 28
+        sigma = 0.005
+        singl = [-1, 1]
+        thresholds = np.ones(class_num)
+        thresholds *= 0.15
+
+        label_predict = (score_predict >= thresholds)
+        make_subs(labels, label_predict, f'./submissions/{number}/{name}_baseline.csv', class_num)
+        make_subs_by_classes(labels, label_predict, f'./submissions/{number}/{name}_baseline', class_num)
 
 
 def one_hot_target(target):
-    one_hot = np.zeros(28)
+    one_hot = np.zeros(28, dtype=np.uint8)
     if target != '':
         targets = np.array(target.split(' ')).astype(np.int).tolist()
         for t in targets:
             one_hot[t] = 1
     return one_hot
+
+
+def target_from_one_hot(one_hot):
+    labels = np.arange(28)[one_hot.astype(np.bool)]
+    label = ' '.join(str(l) for l in labels)
+    return label
+
+
+def ordered_labels(file_in, file_out):
+    labels = pd.read_csv(file_in)
+    for index, row in labels.iterrows():
+        target_ord = one_hot_target(row['Target'])
+        target_ord = target_from_one_hot(target_ord)
+        if row['Target'] != target_ord:
+            row['Target'] = target_ord
+    labels.to_csv(file_out, header=True, index=False)
 
 
 def error_statistic(name):
@@ -317,21 +484,137 @@ def error_statistic(name):
         print(f'\'{k}\' : {class_count[k]} : {predicted[k]/class_count[k]}')
 
 
-def dataset_statistic():
-    labels = pd.read_csv('../DATASET/human_protein_atlas/all/train_ord.csv')
+def dataset_statistic(file='../DATASET/human_protein_atlas/all/train_ord.csv'):
+    sort_complex_target = False
+    labels = pd.read_csv(file)
     plain_targets = {}
+    for c in range(28):
+        plain_targets[str(c)] = 0
     complex_targets = {}
-    for idx, target in tqdm(zip(labels['Id'], labels['Target']), total=len(labels)):
-        if target in complex_targets:
-            complex_targets[target] += 1
-        else:
-            complex_targets[target] = 1
 
-        for t in target.split(' '):
-            if t in plain_targets:
-                plain_targets[t] += 1
+    # Статистика простых и составных классов по всему файлу
+    if 1:
+        for idx, target in tqdm(zip(labels['Id'], labels['Target']), total=len(labels)):
+            if sort_complex_target:
+                os.makedirs(f'./classes_example/complex/{target}/', exist_ok=True)
+                image = load_image('../DATASET/human_protein_atlas/all/train/', idx)
+                imsave(f'./classes_example/complex/{target}/{idx}.jpg', image[:, :, :3])
+            if target in complex_targets:
+                complex_targets[target] += 1
             else:
-                plain_targets[t] = 1
+                complex_targets[target] = 1
+
+            for t in target.split(' '):
+                if t in plain_targets:
+                    plain_targets[t] += 1
+                else:
+                    plain_targets[t] = 1
+
+    # Статистика простых и составных классов по избранным классам
+    if 0:
+        def retarget(targets_):
+            maping = {'0': '0',
+                      '8': '1',
+                      '9': '2',
+                      '10': '3',
+                      '11': '4',
+                      '12': '5',
+                      '13': '6',
+                      '15': '7',
+                      '16': '8',
+                      '17': '9',
+                      '18': '10',
+                      '20': '11',
+                      '24': '12',
+                      '26': '13',
+                      '27': '14'}
+            new_targets_ = []
+            for n_, tr in enumerate(targets_):
+                new_targets_.append(maping[str(tr)])
+            nt = ' '.join(str(l) for l in new_targets_)
+            return nt
+
+        new_idxs = []
+        new_targets = []
+
+        remove_ = [0, 1, 2, 3, 4, 5, 6, 7, 14, 19, 21, 22, 23, 25]
+        remove = {}
+        for r in remove_:
+            remove[str(r)] = 200
+            plain_targets[str(r)] = 0
+        spec = [8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 20, 24, 26, 27]
+        for idx, target in tqdm(zip(labels['Id'], labels['Target']), total=len(labels)):
+            # add 200 removed classes
+            if target in remove:
+                if remove[target] > 0:
+                    plain_targets[target] += 1
+                    remove[target] -= 1
+                    new_idxs.append(idx)
+                    new_targets.append('0')
+
+            # make zero all not spec classes
+            targets = np.array(target.split(' ')).astype(np.uint8).tolist()
+            for n, t in enumerate(targets):
+                if t not in spec:
+                    targets[n] = 0
+            targets = list(set(targets))
+
+            # calculate statistic
+            for t_ in targets:
+                if t_ in spec:
+                    target = ' '.join(str(l) for l in targets)
+
+                    new_idxs.append(idx)
+                    new_targets.append(retarget(targets))
+
+                    if target in complex_targets:
+                        complex_targets[target] += 1
+                    else:
+                        complex_targets[target] = 1
+                    for t in targets:
+                        t = str(t)
+                        if t in plain_targets:
+                            plain_targets[t] += 1
+                        else:
+                            plain_targets[t] = 1
+                    break
+        new_labels = pd.DataFrame()
+        new_labels['Id'] = new_idxs
+        new_labels['Target'] = new_targets
+        new_labels.to_csv('./train_smallest_15.csv', header=True, index=False)
+
+    if 0:
+        hier_targets = []
+        for i in range(28):
+            hier_targets.append({})
+
+        for k in plain_targets:
+            plain_targets[k] = 0
+
+        spec = ['9', '8', '15', '27', '20']
+
+        for k in complex_targets:
+            count = complex_targets[k]
+            # if count == 1:
+            #     count = 8
+            # elif count == 2:
+            #     count = 32
+            # elif count == 3:
+            #     count = 72
+            # elif count == 4:
+            #     count = 128
+            #
+            # complex_targets[k] = count
+
+            for t in k.split(' '):
+                if t in spec and k not in spec:
+                    count = count * count * 8
+                    complex_targets[k] = count
+                plain_targets[t] += count
+                if k in hier_targets[int(t)]:
+                    hier_targets[int(t)][k] += count
+                else:
+                    hier_targets[int(t)][k] = count
 
     print('Plain targets:')
     for k in plain_targets:
@@ -339,6 +622,13 @@ def dataset_statistic():
     print('\n\n\n\nComplex targets:')
     for k in complex_targets:
         print(f'\'{k}\' : {complex_targets[k]}')
+
+    if 0:
+        print('\n\n\n\nHierarcy targets:')
+        for k in range(len(hier_targets)):
+            print(f'{k}')
+            for i in hier_targets[k]:
+                print(f'    \'{i}\' : {hier_targets[k][i]}')
 
 
 def train_distribution():
@@ -362,7 +652,7 @@ def train_distribution():
 
     for n in tqdm(range(23000), total=23000):
         k = np.random.choice(c, p=p)
-        target = random.choice(dist[str(k)])
+        target = rn.choice(dist[str(k)])
         for t in target.split(' '):
             if t in stat:
                 stat[t] += 1
@@ -387,6 +677,7 @@ def score_valid(gpu, fold, train_path, labels, parameter):
     valid_labels = pd.read_csv(f'./folds/valid_{fold}.csv')
     train_ids = train_labels.Id.tolist()
     valid_ids = valid_labels.Id.tolist()
+    labels_idx = labels.Id.tolist()
 
     preprocessor = ImagePreprocessor(parameter)
 
@@ -397,9 +688,10 @@ def score_valid(gpu, fold, train_path, labels, parameter):
     model = BaseLineModel(parameter)
     # model.build_model()
     # model.compile_model()
-    name = '24_resnet18-batch_size-170-lr-0.45417-87ep'
-    model.load(f'./models/new/{name}.h5', custom_objects={'f1_loss': f1_loss, 'f1': f1})
+    name = '29-56ep-0.5247'
+    model.load(f'./models/29/{name}.h5', custom_objects={'f1_loss': f1_loss, 'f1': f1})
     model.set_generators(training_generator, validation_generator)
+
     y_true = np.zeros((len(valid_labels), 28), dtype=np.uint8)
     y_pred = np.zeros((len(valid_labels), 28), dtype=np.uint8)
     n = -1
@@ -415,9 +707,12 @@ def score_valid(gpu, fold, train_path, labels, parameter):
         y_true[n] = one_hot_target(target)
         y_pred[n] = one_hot_target(str_predict_label)
 
-    score = f1_score(y_true, y_pred, average='macro')
-    # score = model.score()
-    print(f'score: {score}')
+    score_macro = f1_score(y_true, y_pred, average='macro')
+    print(f'score_macro: {score_macro}')
+    score_micro = f1_score(y_true, y_pred, average='micro')
+    print(f'score_micro: {score_micro}')
+    score_samples = f1_score(y_true, y_pred, average='samples')
+    print(f'score_samples: {score_samples}')
 
 
 def mean_weights_layer(layer):
@@ -534,6 +829,15 @@ def f1_loss(y_true, y_pred):
     return 1 - K.mean(f1)
 
 
+def get_distribution(labels):
+    dist = np.zeros(28)
+    for idx, target in zip(labels['Id'], labels['Target']):
+        classes = target.split(' ')
+        for cls in classes:
+            dist[int(cls)] += 1
+    return dist
+
+
 class ModelParameter:
     def __init__(self, basepath,
                  lr=0.0001,
@@ -569,17 +873,18 @@ class ModelParameter:
         self.fcl = fcl
         self.aug = aug
         self.tune = tune
+        self.number = number
         if tune == 'lr':
-            self.log_dir = 'logs/{}/{}_{}-{}-{:.8f}'.format(tune, number, arch, tune, self.__getattribute__(tune))
-            self.model_name = './models/{}/{}'.format(tune, number)
+            self.log_dir = 'logs/{}/{}_{}-{}-{:.8f}'.format(number, number, arch, tune, self.__getattribute__(tune))
+            self.model_name = f'./models/{number}/{number}'
             self.model_name = self.model_name + '-{epoch:02d}ep-{val_f1:.4f}.h5'
         elif tune == 'fcl':
-            self.log_dir = 'logs/{}/{}_{}-{}-({})'.format(tune, number, arch, tune, self.fcl)
-            self.model_name = './models/{}/{}'.format(tune, number)
+            self.log_dir = 'logs/{}/{}_{}-{}-({})'.format(number, number, arch, tune, self.fcl)
+            self.model_name = f'./models/{number}/{number}'
             self.model_name = self.model_name + '-{epoch:02d}ep-{val_f1:.4f}.h5'
         else:
-            self.log_dir = 'logs/{}/{}_{}-{}-{}'.format(tune, number, arch, tune, self.__getattribute__(tune))
-            self.model_name = './models/{}/{}'.format(tune, number)
+            self.log_dir = 'logs/{}/{}_{}-{}-{}'.format(number, number, arch, tune, self.__getattribute__(tune))
+            self.model_name = f'./models/{number}/{number}'
             self.model_name = self.model_name + '-{epoch:02d}ep-{val_f1:.4f}.h5'
         self.tensorbord = TensorBoard(log_dir=self.log_dir)
         self.dataset = dataset
@@ -594,7 +899,7 @@ class ImagePreprocessor:
         self.scaled_col_dim = self.parameter.scaled_col_dim
         self.n_channels = self.parameter.n_channels
         self.aug = self.parameter.aug
-        self.augmentation = self.strong_aug_01()
+        self.augmentation = self.strong_aug_02()
 
     def preprocess(self, image, validation=False):
         # image = self.resize(image)
@@ -610,11 +915,13 @@ class ImagePreprocessor:
                 print(f'aug == {self.aug}')
                 image = self.crop9(image)
             elif self.aug == 'strong_aug':
-                image = self.crop_random(image)
+                if (self.parameter.row_scale_factor + self.parameter.col_scale_factor) > 2:
+                    image = self.crop_random(image)
                 data = {"image": image}
                 image = self.augmentation(**data)["image"]
         else:
-            image = self.crop_random(image)
+            if (self.parameter.row_scale_factor + self.parameter.col_scale_factor) > 2:
+                image = self.crop_random(image)
         image = self.normalize(image)
         return image
 
@@ -710,13 +1017,13 @@ class ImagePreprocessor:
             ], p=1.0)
         ], p=p)
 
-    def strong_aug_02(self, p=0.5):
+    def strong_aug_02(self, p=0.9):
         return Compose([
             OneOf([
                 RandomRotate90(),
                 Flip(),
                 Transpose(),
-                ElasticTransform(),
+                # ElasticTransform(),
             ], p=1.0)
         ], p=p)
 
@@ -800,7 +1107,7 @@ class DataGenerator(keras.utils.Sequence):
         return X, y
 
 
-class DataGeneratorTrainDist(keras.utils.Sequence):
+class DataGeneratorTrainBalance(keras.utils.Sequence):
 
     def __init__(self, list_IDs, labels, modelparameter, imagepreprocessor, validation=False):
         self.params = modelparameter
@@ -880,12 +1187,142 @@ class DataGeneratorTrainDist(keras.utils.Sequence):
 
         for i in range(self.batch_size):
             k = np.random.choice(c, p=p)
-            idx = random.choice(self.dist_idxs[str(k)])
+            idx = rn.choice(self.dist_idxs[str(k)])
             if self.use_memory:
                 image = self.dataset[self.nlabels[idx]]
             else:
                 image = self.preprocessor.load_image(idx)
             image = self.preprocessor.preprocess(image, self.validation)
+            X[i] = image
+            # Store class
+            y[i] = self.get_targets_per_image(idx)
+
+        return X, y
+
+
+class DataGeneratorTrainBalanceNew(keras.utils.Sequence):
+
+    def __init__(self, list_IDs, labels, modelparameter, imagepreprocessor, validation=False):
+        self.params = modelparameter
+        self.labels = labels
+        self.list_IDs = list_IDs
+        self.dim = (self.params.scaled_row_dim, self.params.scaled_col_dim)
+        self.batch_size = self.params.batch_size
+        self.n_channels = self.params.n_channels
+        self.num_classes = self.params.num_classes
+        self.shuffle = self.params.shuffle
+        self.preprocessor = imagepreprocessor
+        self.on_epoch_end()
+        self.dataset = self.params.dataset
+        self.use_memory = (self.dataset is not None)
+        self.validation = validation
+        if self.use_memory:
+            self.nlabels = {}
+            for n, idx in tqdm(enumerate(labels['Id'].tolist()), total=len(labels)):
+                self.nlabels[idx] = n
+        self.dist_base_classes, self.dist_classes, self.idx_class, self.max_len_base_class = self.__make_dist_dataset()
+
+    def on_epoch_end(self):
+        self.indexes = np.arange(len(self.list_IDs))
+        if self.shuffle == True:
+            np.random.shuffle(self.indexes)
+
+    def get_targets_per_image(self, identifier):
+        return self.labels.loc[self.labels.Id == identifier].drop(['Id', 'Target', 'number_of_targets'], axis=1).values
+
+    def __data_generation(self, list_IDs_temp):
+        'Generates data containing batch_size samples'  # X : (n_samples, *dim, n_channels)
+        # Initialization
+        X = np.empty((self.batch_size, *self.dim, self.n_channels), dtype=np.float16)
+        y = np.empty((self.batch_size, self.num_classes), dtype=int)
+        # Generate data
+        for i, identifier in enumerate(list_IDs_temp):
+            # Store sample
+            if self.use_memory:
+                image = self.dataset[self.nlabels[identifier]]
+            else:
+                image = self.preprocessor.load_image(identifier)
+            image = self.preprocessor.preprocess(image, self.validation)
+            X[i] = image
+            # Store class
+            y[i] = self.get_targets_per_image(identifier)
+        return X, y
+
+    def __make_dist_dataset(self):
+        labels = pd.read_csv('./folds/train_1.csv')
+        dist_base_classes = {}
+        dist_classes = {}
+        idx_class = {}
+
+        for i in range(28):
+            dist_base_classes[str(i)] = []
+
+        for idx, target in tqdm(zip(labels['Id'], labels['Target']), total=len(labels)):
+            idx_class[idx] = target
+
+            if target in dist_classes:
+                dist_classes[target].append(idx)
+            else:
+                dist_classes[target] = []
+                dist_classes[target].append(idx)
+
+            for t in target.split(' '):
+                dist_base_classes[t].append(idx)
+
+        max_len_base_class = 0
+        for k in dist_base_classes:
+            if len(dist_base_classes[k]) > max_len_base_class:
+                max_len_base_class = len(dist_base_classes[k])
+
+        return dist_base_classes, dist_classes, idx_class, max_len_base_class
+
+    def __make_new_train_example(self, class_):
+        lr = np.random.choice([True, False])
+        class_idxs = self.dist_classes[class_]
+        idx1 = class_idxs[randrange(0, len(class_idxs))]
+        idx2 = class_idxs[randrange(0, len(class_idxs))]
+        if self.use_memory:
+            img1 = self.dataset[self.nlabels[idx1]]
+            img2 = self.dataset[self.nlabels[idx2]]
+        else:
+            img1 = self.preprocessor.load_image(idx1)
+            img2 = self.preprocessor.load_image(idx2)
+
+        img1 = self.preprocessor.preprocess(img1, False)
+        img2 = self.preprocessor.preprocess(img2, False)
+
+        image = np.zeros((512, 512, 4), dtype=np.float16)
+        if lr:
+            image[:, :256, :] = img1[:, :256, :]
+            image[:, 256:, :] = img2[:, 256:, :]
+        else:
+            image[:256, :, :] = img1[:256, :, :]
+            image[256:, :, :] = img2[256:, :, :]
+        return image, idx1
+
+    def __len__(self):
+        'Denotes the number of batches per epoch'
+        return int(23000 / self.batch_size)
+
+    def __getitem__(self, index):
+        X = np.empty((self.batch_size, *self.dim, self.n_channels), dtype=np.float16)
+        y = np.empty((self.batch_size, self.num_classes), dtype=np.uint8)
+
+        for i in range(self.batch_size):
+            base_class = str(randrange(0, 28))
+            idxn = randrange(0, self.max_len_base_class)
+            if idxn >= len(self.dist_base_classes[base_class]):
+                idxn = randrange(0, len(self.dist_base_classes[base_class]))
+                cls = self.idx_class[self.dist_base_classes[base_class][idxn]]
+                image, idx = self.__make_new_train_example(cls)
+            else:
+                idx = self.dist_base_classes[base_class][idxn]
+                if self.use_memory:
+                    image = self.dataset[self.nlabels[idx]]
+                else:
+                    image = self.preprocessor.load_image(idx)
+                image = self.preprocessor.preprocess(image, self.validation)
+
             X[i] = image
             # Store class
             y[i] = self.get_targets_per_image(idx)
@@ -965,7 +1402,7 @@ class BaseLineModel:
 
     def score(self):
         return self.model.evaluate_generator(generator=self.validation_generator,
-                                             use_multiprocessing=True,
+                                             use_multiprocessing=False,
                                              workers=16,
                                              verbose=1)
 
@@ -980,9 +1417,41 @@ class BaseLineModel:
         self.model = load_model(modelinputpath, custom_objects=custom_objects)
 
 
+def train_gpu(gpu, fold, train_path, labels, parameter, train_generator=''):
+    os.environ['CUDA_VISIBLE_DEVICES'] = gpu
+
+    os.makedirs(f'models/{parameter.number}/', exist_ok=True)
+
+    train_labels = pd.read_csv(f'./folds/train_{fold}.csv')
+    valid_labels = pd.read_csv(f'./folds/valid_{fold}.csv')
+    train_ids = train_labels.Id.tolist()
+    valid_ids = valid_labels.Id.tolist()
+
+    preprocessor = ImagePreprocessor(parameter)
+
+    if train_generator == 'train_balance':
+        print(f'train_generator = {train_generator}')
+        training_generator = DataGeneratorTrainBalanceNew(train_ids, labels, parameter, preprocessor)
+    else:
+        training_generator = DataGenerator(train_ids, labels, parameter, preprocessor)
+    validation_generator = DataGenerator(valid_ids, labels, parameter, preprocessor, validation=True)
+    predict_generator = PredictGenerator(valid_ids, preprocessor, train_path)
+
+    model = BaseLineModel(parameter)
+    model.build_model()
+    model.compile_model()
+    # name = ''
+    # model.load(f'./models/batch_size/{name}.h5', custom_objects={'f1_loss': f1_loss, 'f1': f1})
+    model.set_generators(training_generator, validation_generator)
+    history = model.learn()
+
+    # os.makedirs(f'models/{parameter.tune}/', exist_ok=True)
+    # model.save(parameter.model_name)
+
+
 def main():
     train_path = '../DATASET/human_protein_atlas/all/train/'
-    labels = get_labels('../DATASET/human_protein_atlas/all/train.csv')
+    labels = get_labels('../DATASET/human_protein_atlas/all/train_ord.csv')
 
     # dataset = None
     # dataset = np.zeros((len(labels), 512, 512, 4), dtype=np.uint8)
@@ -994,32 +1463,35 @@ def main():
 
     param1 = ModelParameter(train_path,
                             lr=0.00003,
-                            fcl=[1024, 1024, 1024],
-                            batch_size=170,
+                            fcl=[512],
+                            row_scale_factor=1,
+                            col_scale_factor=1,
+                            batch_size=30,
                             n_epochs=100,
                             tune='batch_size',
                             arch='resnet18',
                             dataset=dataset,
-                            aug='strong_aug',
-                            number=28,
+                            aug='',
+                            number=34,
                             shuffle=True)
 
-    train_gpu('0', 1, train_path, labels, param1)
+    train_gpu('0', 1, train_path, labels, param1, 'train_balance')
 
-    # p1 = Process(target=train_gpu, args=('0', 1, train_path, labels, param1))
+    # p1 = Process(target=train_gpu, args=('0', 1, train_path, labels, param1, 'train_balance'))
     #
     # param2 = ModelParameter(train_path,
-    #                         lr=0.00002738,
-    #                         fcl1=1024,
-    #                         fcl2=1024,
-    #                         batch_size=64,
-    #                         n_epochs=200,
-    #                         tune='aug',
+    #                         lr=0.00003,
+    #                         fcl=[1024],
+    #                         batch_size=100,
+    #                         n_epochs=100,
+    #                         tune='batch_size',
     #                         arch='resnet18',
     #                         dataset=dataset,
-    #                         aug='')
+    #                         aug='strong_aug',
+    #                         number=30,
+    #                         shuffle=True)
     #
-    # p2 = Process(target=train_gpu, args=('1', 1, train_path, labels, param2))
+    # p2 = Process(target=train_gpu, args=('1', 1, train_path, labels, param2, ''))
     #
     # p1.start()
     # p2.start()
@@ -1029,5 +1501,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
-    # error_statistic('22_rn18-strong_aug-valf1-0.44200-119ep')
+    # ordered_labels('../DATASET/human_protein_atlas/extended.csv', '../DATASET/human_protein_atlas/extended_ord.csv')
+    # dataset_statistic('../DATASET/human_protein_atlas/extended_ord.csv')
+    # dataset_statistic('./train_smallest_15.csv')
+    # main()
+    predict_submission('checkpoint-ep20-f1(0.3507)-PL(0.493)', 111111, TTA=False)
+    # predict_submission('31-52ep-0.4585', 31, TTA=False)

@@ -56,21 +56,45 @@ def strong_aug(p=0.5):
     ], p=p)
 
 
-image = load_image()
-scipy.misc.imsave(f'./augs/origing.jpg', image[:, :, :3])
-
-whatever_data = "my name"
-augmentation = strong_aug(p=1.0)
-data = {"image": image}
-
-for n in range(1000):
-    # augmented = augmentation(**data)
-    # image = augmented["image"]
-    image = augmentation(**data)["image"]
-    # print(f'shape={image.shape}')
-    if image.shape[2] == 3:
-        print(f'shape={image.shape}')
-    scipy.misc.imsave(f'./augs/{randint(1, 100000000)}.jpg', image[:, :, :3])
+# image = load_image()
+# scipy.misc.imsave(f'./augs/origin.jpg', image[:, :, :3])
+#
+# whatever_data = "my name"
+# augmentation = strong_aug(p=1.0)
+# data = {"image": image}
+#
+# for n in range(1000):
+#     # augmented = augmentation(**data)
+#     # image = augmented["image"]
+#     image = augmentation(**data)["image"]
+#     # print(f'shape={image.shape}')
+#     if image.shape[2] == 3:
+#         print(f'shape={image.shape}')
+#     scipy.misc.imsave(f'./augs/{randint(1, 100000000)}.jpg', image[:, :, :3])
 
 # plt.imshow(image[:, :, :3])
 # plt.show()
+
+def tensor_to_image(tensor):
+    img = np.zeros((512, 512, 4))
+    for i in range(4):
+        img[:, :, i] = tensor[0, i, :, :]
+    return img
+
+
+def image_to_tensor(img):
+    tensor = np.zeros((1, 4, 512, 512))
+    for i in range(4):
+        tensor[0, i, :, :] = img[:, :, i]
+    return tensor
+
+
+image = load_image()
+tensor = image_to_tensor(image)
+image = tensor_to_image(tensor)
+scipy.misc.imsave(f'./classes_example/tta/origin.jpg', image[:, :, :3])
+scipy.misc.imsave(f'./classes_example/tta/fliplr.jpg', np.fliplr(image)[:, :, :3])
+scipy.misc.imsave(f'./classes_example/tta/flipud.jpg', np.flipud(image)[:, :, :3])
+scipy.misc.imsave(f'./classes_example/tta/rot90_1.jpg', np.rot90(image, 1)[:, :, :3])
+scipy.misc.imsave(f'./classes_example/tta/rot90_2.jpg', np.rot90(image, 2)[:, :, :3])
+scipy.misc.imsave(f'./classes_example/tta/rot90_3.jpg', np.rot90(image, 3)[:, :, :3])
